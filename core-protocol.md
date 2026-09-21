@@ -2,7 +2,7 @@
 
 **Version:** 0.3.0
 **Status:** Draft
-**Date:** 2026-04-28
+**Date:** 2026-09-21
 
 ## 1. Introduction
 
@@ -17,9 +17,11 @@ Anything NATS already provides is used as-is. The protocol adds only what is mis
 
 Out of scope for v0.3:
 
-- End-to-end encryption and strong agent identity.
+- End-to-end encryption.
 - The `attachments` endpoint (§2 reserves the verb; §5.5 sketches intent).
 - JetStream-backed at-least-once streaming.
+
+Strong sender identity is not out of scope: §13 defines it as an optional extension that leaves the wire behaviour of §1–§12 unchanged.
 
 ### 1.1 Conventions
 
@@ -611,7 +613,9 @@ Authentication and authorization are delegated to NATS server configuration. Age
 - The protocol defines no pairing, allowlisting, or handshake.
 - Deployments SHOULD use NATS accounts and subject permissions to isolate agents by tenant or environment.
 
-E2E encryption and strong per-agent identity are deferred to a future revision.
+E2E encryption is deferred to a future revision.
+
+Per-message sender identity is an optional extension (§13): a signed `Agent-Sender` header lets a receiver verify which NATS user sent a request, in every topology. It identifies; which verified senders to accept remains the deployment's decision.
 
 ### 10.2 Credential management
 
@@ -664,6 +668,16 @@ An **agent** is compliant with protocol `0.3` when it:
 - If it issues mid-stream queries: conforms to §7.
 - Uses `respondError` per §9 for errors; `Nats-Service-Error-Code` is set from the §9.2 taxonomy.
 
+Optional: an **agent that implements §13** (sender identity) additionally:
+
+- Declares `min_sender_trust` (`any` or `signed`) in the `prompt` endpoint metadata; declares nothing on `status` (§13.9).
+- Adds `user_nkey`, `account`, and `id_sig` to the service metadata (§13.10).
+- Classifies every `prompt` and `status` request as verified, claimed, or absent before the application sees it. Rejects a malformed `Agent-Sender` with `400` and a failing signature with `401`, whatever `min_sender_trust` says (§13.7).
+- Accepts `sub` only in the forms of §13.7.1; enforces the replay window and a nonce set.
+- On a `signed` endpoint, rejects a request that is not verified with `401`. Answers `403` when it refuses a verified sender. Never rejects a `status` request on identity grounds (§13.9).
+- Grants nothing on a claimed identity, or on `account` alone (§13.1, §13.7.2).
+- Signs every heartbeat it publishes when it holds its seed. Never signs a reply (§13.11).
+
 A **caller** is compliant when it:
 
 - Performs discovery only via `$SRV.PING.agents` and `$SRV.INFO.agents[.{instance_id}]`.
@@ -677,6 +691,372 @@ A **caller** is compliant when it:
 - Silently ignores unknown chunk types, unknown endpoint names, and unknown metadata keys.
 - Preserves unknown metadata fields when relaying.
 - Tracks liveness per `instance_id` (§8.1).
+
+Optional: a **caller that implements §13** (sender identity) additionally:
+
+- Learns its agent ID once per connection: from the credentials JWT when it holds one, otherwise from `$SYS.REQ.USER.INFO`. Sends no `Agent-Sender` when it has no identity (§13.4).
+- Attaches `Agent-Sender` to every `prompt` and `status` request. Signs it when it holds the seed, with a fresh nonce and `sub` per §13.6.2.
+- Includes the header bytes in the local `max_payload` check (§13.5.1).
+- Reads `min_sender_trust` before sending. Fails locally when the endpoint requires `signed` and it cannot sign; treats an unknown value as `signed` (§13.9).
+- Builds and parses agent IDs only in the canonical text form, checking both halves (§13.3).
+- Treats registration identity metadata as a claim unless `id_sig` verifies (§13.10).
+
+---
+
+## 13. Sender identity (optional extension)
+
+This chapter defines an optional extension. A caller proves which NATS user sent a request; an agent proves which NATS user registered it and published its heartbeats. The extension is wire-compatible with §1–§12: an agent or caller that does not implement it behaves exactly as those sections define, and interoperates with one that does (§13.13). `protocol_version` stays `"0.3"`.
+
+The subject hierarchy (§2) names only the receiver; no token names the caller. The sender identity therefore travels with the message, in a header.
+
+### 13.1 Trust classes
+
+The extension trusts only what the receiver can verify on the message itself. One mechanism meets that bar: a signature by the sender's user NKEY (§13.6). Everything else is a claim.
+
+| Class    | Evidence                                                                 | Meaning                                                   |
+|----------|--------------------------------------------------------------------------|-----------------------------------------------------------|
+| verified | `Agent-Sender` header with a valid signature (§13.7)                     | The sender holds the seed for `user`.                     |
+| claimed  | `Agent-Sender` header without `sig`; any `Nats-Request-Info` header      | Display only: logs, UI, conversation threading.           |
+| absent   | No `Agent-Sender` header, or one with an unknown `v`                     | The message has no sender.                                |
+
+A receiver MUST NOT grant anything on a claimed identity.
+
+`Nats-Request-Info` is always a claim. The server stamps it only when a request crosses an account boundary through a service import with `share: true`. Within one account the server forwards a client-written `Nats-Request-Info` unchanged. Both arrive as identical bytes, so a receiver cannot tell a server stamp from a forgery.
+
+### 13.2 Agent ID
+
+The agent ID is the pair `(account, user)` that NATS gives every authenticated connection:
+
+| Half      | Content                                                                                          |
+|-----------|--------------------------------------------------------------------------------------------------|
+| `account` | The account public NKEY (`A…`). On a server without operator mode, the account name (§13.3.1).  |
+| `user`    | The user public NKEY (`U…`).                                                                    |
+
+The protocol invents no identity of its own. Two agents that share a NATS user share one agent ID, and nothing downstream can tell them apart; each agent SHOULD connect as its own NATS user. Several instances of one logical agent (§3.4) on one user share one agent ID, which is consistent: they are one agent to the caller.
+
+`owner` (§3.2) is a label naming the operator; `account` is the NATS account. They are unrelated, and neither replaces the other.
+
+#### 13.2.1 What is secret
+
+An NKEY is an ed25519 key pair in NATS text encoding. The design rests on keeping its halves apart:
+
+| Half       | Looks like                  | Held by                | Role                                                                                              |
+|------------|-----------------------------|------------------------|---------------------------------------------------------------------------------------------------|
+| Seed       | `SU…` for a user            | the agent, no one else | Signs. Authenticates the connection and produces every signature in this chapter. **The secret.** |
+| Public key | `U…` user, `A…` account     | anyone                 | Verifies signatures and names the identity. Safe to publish; useless for forging.                 |
+
+A credentials file bundles the user JWT (public: the server's signed statement of who the user is) with the seed; the seed makes the file sensitive. Only the seed holder can sign. Rotating a seed produces a new public key and therefore a new agent ID; reissuing a JWT does not.
+
+### 13.3 Canonical text form
+
+Every place an agent ID is carried as text — a subject, a KV key, a JSON field, a stored record, a log line — MUST use this form and no other:
+
+```
+{account}.{user}
+```
+
+| Token     | Content                                                                    | Length       |
+|-----------|----------------------------------------------------------------------------|--------------|
+| `account` | The account as the server reports it (§13.4)                               | 56 for an NKEY |
+| `.`       | One separator                                                              | 1            |
+| `user`    | The user public NKEY: `U` and 55 base32 characters (`A`–`Z`, `2`–`7`)      | 56           |
+
+- Upper case exactly as NATS issues the NKEY. Implementations MUST NOT change case.
+- No whitespace, no quotes, no other separator.
+- Two agent IDs are equal if and only if their text forms are byte-equal.
+- On an operator-mode server (Synadia Cloud, and every `nsc`-managed deployment), `account` is the account public NKEY: `A` and 55 base32 characters. The form is then 113 characters.
+
+A parser MUST accept exactly the strings matching
+
+```
+^(A[A-Z2-7]{55}|[A-Za-z0-9_-]+|\$G)\.U[A-Z2-7]{55}$
+```
+
+and passing the NKEY check. The regex is the shape check. The NKEY check (prefix byte and CRC-16) MUST run on `user`, and on `account` whenever `account` starts with `A` and is 56 characters long. The name branch of the regex also matches the NKEY shape; the NKEY check, not the regex, tells an NKEY account from a name.
+
+Neither token may be empty. There is no zero agent ID: two zero IDs would compare equal, and two anonymous senders are not the same sender.
+
+#### 13.3.1 Accounts without an NKEY
+
+On a server without operator mode (accounts from the configuration file, no JWTs) an account has no NKEY. The server reports the configured account name; a server with no accounts reports the global account `$G`. `account` is then that name. The name form exists only for such servers, so that an NKEY user on a self-run server still has a verifiable identity.
+
+The name MUST be one token matching `[A-Za-z0-9_-]+`, or the literal `$G`. A server that reports any other account name (one containing `.`, `*`, `>`, whitespace, or any other character) gives the connection no representable identity: it runs the protocol without identity (§13.4).
+
+One user, three servers:
+
+```
+AABYLMBR6Q2CDXTLGRQCFA2GP76BGCDF7NZF2OVHH4RQ7L3Y3TZWJDRL.UAWW24XPLGOX3R3JF4OZEZZ6RUXMB55DSWJCEFFSUDFBCKJD4MSCMQYI   # operator mode
+ACME.UAWW24XPLGOX3R3JF4OZEZZ6RUXMB55DSWJCEFFSUDFBCKJD4MSCMQYI                                                        # account named ACME
+$G.UAWW24XPLGOX3R3JF4OZEZZ6RUXMB55DSWJCEFFSUDFBCKJD4MSCMQYI                                                          # no accounts
+```
+
+`$G` names a different account on every such server. An agent ID built from it is valid text, but not portable.
+
+#### 13.3.2 In subjects and KV stores
+
+The form is two subject tokens, each within the 63-character limit of §2.2. It drops into a subject unchanged and comes back out as that subject's last two tokens. With `svc` standing for any prefix a deployment owns, `svc.{account}.>` matches every agent of one account and `svc.*.{user}` matches one user in any account. The protocol itself defines no subject that carries an agent ID; its subjects stay as §2 defines them.
+
+NKEY tokens are an exception to the lower-case recommendation of §2.2: they are upper case as issued. `$G` is a legal NATS token, not a §2.2-conformant one, and appears only on a server with no accounts.
+
+A KV key allows `[-/_=.a-zA-Z0-9]` and uses `.` as its separator, so the NKEY form and the name form are valid KV key names unchanged. `$G` is not.
+
+#### 13.3.3 Parse fixtures
+
+A conforming parser gives these results. Each key is a real NKEY. The same cases, machine-readable, are in [`test-fixtures/identity/agent-id-fixtures.json`](https://github.com/synadia-ai/synadia-agents/blob/main/test-fixtures/identity/agent-id-fixtures.json).
+
+| Input | Result |
+|-------|--------|
+| `AABYLMBR6Q2CDXTLGRQCFA2GP76BGCDF7NZF2OVHH4RQ7L3Y3TZWJDRL.UAWW24XPLGOX3R3JF4OZEZZ6RUXMB55DSWJCEFFSUDFBCKJD4MSCMQYI` | valid, NKEY account |
+| `ACME.UAWW24XPLGOX3R3JF4OZEZZ6RUXMB55DSWJCEFFSUDFBCKJD4MSCMQYI` | valid, account name |
+| `$G.UAWW24XPLGOX3R3JF4OZEZZ6RUXMB55DSWJCEFFSUDFBCKJD4MSCMQYI` | valid, global account |
+| `UAWW24XPLGOX3R3JF4OZEZZ6RUXMB55DSWJCEFFSUDFBCKJD4MSCMQYI.AABYLMBR6Q2CDXTLGRQCFA2GP76BGCDF7NZF2OVHH4RQ7L3Y3TZWJDRL` | invalid: tokens swapped |
+| `AABYLMBR6Q2CDXTLGRQCFA2GP76BGCDF7NZF2OVHH4RQ7L3Y3TZWJDRL:UAWW24XPLGOX3R3JF4OZEZZ6RUXMB55DSWJCEFFSUDFBCKJD4MSCMQYI` | invalid: separator |
+| `aabylmbr6q2cdxtlgrqcfa2gp76bgcdf7nzf2ovhh4rq7l3y3tzwjdrl.uaww24xplgox3r3jf4ozezz6ruxmb55dswjceffsudfbckjd4mscmqyi` | invalid: case changed |
+| `AABYLMBR6Q2CDXTLGRQCFA2GP76BGCDF7NZF2OVHH4RQ7L3Y3TZWJDRL.UAWW24XPLGOX3R3JF4OZEZZ6RUXMB55DSWJCEFFSUDFBCKJD4MSCMQY` | invalid: user NKEY truncated |
+| `AABYLMBR6Q2CDXTLGRQCFA2GP76BGCDF7NZF2OVHH4RQ7L3Y3TZWJDRL.UAWW24XPLGOX3R3JF4OZEZZ6RUXMB55DSWJCEFFSUDFBCKJD4MSCMQYI.extra` | invalid: three tokens |
+| `UAWW24XPLGOX3R3JF4OZEZZ6RUXMB55DSWJCEFFSUDFBCKJD4MSCMQYI` | invalid: a user NKEY alone is not an agent ID |
+| `acme corp.UAWW24XPLGOX3R3JF4OZEZZ6RUXMB55DSWJCEFFSUDFBCKJD4MSCMQYI` | invalid: account name with a space |
+| `AABYLMBR6Q2CDXTLGRQCFA2GP76BGCDF7NZF2OVHH4RQ7L3Y3TZWJDRM.UAWW24XPLGOX3R3JF4OZEZZ6RUXMB55DSWJCEFFSUDFBCKJD4MSCMQYI` | invalid: account has the NKEY shape but fails the CRC |
+
+### 13.4 A connection's own identity
+
+A party learns its own agent ID once per connection:
+
+1. From the user JWT, when the connection uses a credentials file. `sub` is the user public NKEY; `iss` is the account public NKEY, or `nats.issuer_account` when a signing key issued the JWT.
+2. Otherwise from `$SYS.REQ.USER.INFO`, which returns the connection's own `user` and `account` to any connected user.
+
+With a JWT in hand the implementation SHOULD NOT ask the server. `$SYS.REQ.USER.INFO` is an ordinary subject: a same-account user with default permissions can subscribe to it, see the request, and answer before the server does. The JWT cannot be raced. An implementation that consults both sources MUST find the same pair, and otherwise treats the identity as unknown. Credentials files exist only in operator mode, so the JWT source never applies to a configuration-file server.
+
+| Connection                                                     | Server reply                                          | Identity   |
+|----------------------------------------------------------------|-------------------------------------------------------|------------|
+| Operator mode, with credentials                                | `user` = `U…`, `account` = `A…`                       | `A….U…`    |
+| Configuration-file server, NKEY user, named account            | `user` = `U…`, `account` = the name                   | `{name}.U…` |
+| Configuration-file server, NKEY user, no accounts              | `user` = `U…`, `account` = `$G`                       | `$G.U…`    |
+| Configuration-file server, NKEY user, name outside `[A-Za-z0-9_-]+` | `user` = `U…`, `account` = the name              | none       |
+| No authentication                                              | `user` empty                                          | none       |
+| Password or token user                                         | `user` = the user name, or `[REDACTED]` for a token   | none       |
+| No reply within the timeout (default 2 s)                      | —                                                     | unknown    |
+
+*None* means the server answered and the connection has no NKEY user; the remedy is an NKEY user or a credentials file. *Unknown* means the implementation does not know: the server did not answer, or a permission blocks the request. It MUST NOT guess, and MUST NOT keep the failure for the connection's lifetime; it retries after a short interval. A permission that blocks `$SYS.REQ.USER.INFO` yields no reply but an asynchronous `-ERR 'Permissions Violation for Publish …'`; an implementation that observes it SHOULD treat the identity as unknown at once rather than wait for the timeout.
+
+A connection whose identity is none or unknown:
+
+- Sends no `Agent-Sender` header — never one with empty fields, never an invented name.
+- Fails a send locally, before publishing, when the target endpoint declares `min_sender_trust: signed` (§13.9).
+
+A verified identity on a self-run server therefore needs one thing: an NKEY user in the server configuration, and its seed at the client. Every other local setup runs the protocol without identity, which every endpoint with `min_sender_trust: any` accepts.
+
+### 13.5 The `Agent-Sender` header
+
+A caller that implements this chapter and has an identity (§13.4) MUST set one `Agent-Sender` header on every `prompt` and `status` request:
+
+```
+Agent-Sender: {"v":1,"account":"A…","user":"U…","name":"claude-code","sub":"agents.prompt.claude-code.aconnolly.synadia-com-2","ts":"2026-04-28T14:23:01Z","nonce":"<NUID>","sig":"<base64url>"}
+```
+
+| Field     | Required     | Description                                                                                                                                  |
+|-----------|--------------|----------------------------------------------------------------------------------------------------------------------------------------------|
+| `v`       | Yes          | Header format version. This document defines the JSON number `1`.                                                                            |
+| `account` | Yes          | The caller's account (§13.3).                                                                                                                |
+| `user`    | Yes          | The caller's user public NKEY.                                                                                                               |
+| `name`    | No           | Display name. Never identity. Outside the signature by design: a relay may rewrite it, and nothing may depend on it.                         |
+| `sub`     | When signed  | The subject the caller publishes to, byte for byte, with the one exception of §13.6.2. The `subject` line of the signed input.               |
+| `ts`      | When signed  | Request time, RFC 3339 UTC. Signers SHOULD emit second precision with the `Z` suffix; verifiers MUST accept fractional seconds.               |
+| `nonce`   | When signed  | Unique per request from this `user`: 1–64 characters from `[A-Za-z0-9_-]`. A NUID (22 characters) is RECOMMENDED.                           |
+| `sig`     | When signed  | Signature (§13.6), base64url without padding.                                                                                                |
+
+`account` and `user` together are the agent ID (§13.2). A header without `sig` is a claim; a caller MAY send one when it holds no seed.
+
+#### 13.5.1 Wire form
+
+- The header name is `Agent-Sender`, matched case-sensitively.
+- The value is compact JSON on one line: no line breaks, no whitespace between tokens. NATS header values cannot carry CR or LF.
+- Unknown fields are ignored. A receiver treats a header with an unknown `v` as absent.
+- A header is **malformed** when it is not valid JSON; lacks `v`, `account`, or `user`; carries a field of the wrong shape; or carries `sig` without all of `sub`, `ts`, and `nonce`. `v` is the number `1`, not the string `"1"`. A receiver rejects a malformed header with `400` (§9.2).
+- The header counts toward the server's `max_payload`, which covers headers and payload together. Callers MUST include the header bytes in the local check of §5.4. A signed header block is about 400 bytes with an NKEY account (Appendix B.13).
+
+### 13.6 Signing (caller side)
+
+#### 13.6.1 Signed input
+
+The caller signs with its user seed. The signed input is this byte string:
+
+```
+AGENT-SENDER-V1\n{account}\n{user}\n{subject}\n{ts}\n{nonce}\n{sha256(payload) lowercase hex}\n
+```
+
+- `\n` is one LF byte (`0x0A`). Every line, the last included, ends with one.
+- `account`, `user`, `ts`, and `nonce` are the header's values, byte for byte. `subject` is the header's `sub`.
+- `payload` is the raw message payload. An empty payload, for example a `status` request, hashes to the SHA-256 of zero bytes (`e3b0c442…b855`).
+
+The signature is ed25519 over those bytes — the NKEY `Sign` operation — encoded base64url without padding. The signed input is never sent: the caller transmits only `sig`, and the receiver rebuilds the input from the header fields and the message it received.
+
+The first line is a fixed tag. It separates this signature from every other signature the same seed produces (an `id_sig`, §13.10, never passes as a `sig`, nor the reverse), and it names the format, so a `V2` can coexist with `V1`.
+
+| Bound               | Blocks                                                          |
+|---------------------|-----------------------------------------------------------------|
+| `account`, `user`   | A relay swapping the agent ID under a valid signature.          |
+| `subject`           | Transplanting the header onto a request to a different agent.   |
+| payload hash        | Reuse of the header on a different payload.                     |
+| `ts`, `nonce`       | Replay of the identical request.                                |
+
+Signing needs no knowledge of how the receiver is deployed — same account, cross account, relayed — only of the caller's own account's imports (§13.6.2).
+
+#### 13.6.2 The signed subject
+
+`sub` travels in the header because the receiver does not always see the subject the caller published to. The caller signs the subject it publishes to, with one exception:
+
+- **An import renamed by the caller's own account.** When the caller's account imported the service under a different local name (`to` in a server configuration file, `local_subject` in an account JWT), the caller signs the exporter's subject: the subject its import names, which is also what `$SRV.INFO` reports. The receiver cannot know the local names its importers chose; the caller's own account configured the rename, and the caller must use the local name to publish at all. At the receiver `sub` then equals the arrival subject.
+
+Two cases need nothing from the signer beyond signing what it publishes:
+
+- **An export that inserts the caller's account** (`account_token_position`). The server inserts the caller's account at that position on the way in; the receiver removes it before comparing (§13.7.1 (b)). A `to` that merely drops that token is not a rename in the sense above.
+- **A subject the signer also publishes for its own account.** When a subject has consumers in the signer's own account and another account imports it under a different name, the signer cannot sign the importer's name without failing every verifier at home. The heartbeat (§13.11) is the case. The receiver accepts it by §13.7.1 (c).
+
+### 13.7 Verification (receiver side)
+
+A receiver that implements this chapter classifies each request before the application sees it:
+
+1. No `Agent-Sender` header, or an unknown `v`: **absent**. The application sees an absent sender, never an empty ID, and no lookup runs on it: an empty key must not match anything.
+2. A malformed header (§13.5.1): reject with `400`.
+3. A header with `sig`: rebuild the signed input from the header's `account`, `user`, `sub`, `ts`, and `nonce` and the SHA-256 of the received payload, and verify `sig` against `user`. Then check:
+   - `sub` is acceptable for the arrival subject (§13.7.1).
+   - `ts` lies within the replay window (default: 30 s skew).
+   - `nonce` has not been seen for this `user` within the window. The nonce set is keyed by `(user, nonce)`.
+
+   If all pass, the request is **verified**: the sender holds the seed for `user`, and `(account, user)` is the pair it signed. If any fails, reject with `401`. A failing signature is evidence of tampering or replay, never a weaker claim; it is rejected whatever the endpoint's `min_sender_trust`. An implementation MAY run the cheap checks before the signature; the outcome is the same.
+4. A well-formed header without `sig`: **claimed**.
+
+Rejections follow §9: an error-headered message, then the terminator.
+
+| Code  | When                                                                                                                        |
+|-------|-----------------------------------------------------------------------------------------------------------------------------|
+| `400` | Malformed `Agent-Sender` header.                                                                                             |
+| `401` | Signature required (§13.9) but absent; signature present and failing, in every mode; a refused sender that is claimed or absent — nothing was authenticated. |
+| `403` | Sender verified, but not accepted by the receiver (§13.7.3).                                                                |
+
+The nonce set lives in the receiving instance. Instances of one logical agent behind the `agents` queue group (§3.4) do not share it, so a replay that lands on another instance within the window passes the nonce check; the `ts` window bounds the exposure. A shared nonce store is a deployment option, not a protocol requirement.
+
+#### 13.7.1 Acceptable `sub`
+
+`sub` is always compared with the arrival subject of this message, never with a pattern: a pattern would let any agent holding a fresh signed header re-present it to a sibling under the same pattern. Exactly three forms are acceptable:
+
+- **(a) Equal.** `sub` equals the arrival subject. This covers the direct case and the import renamed by the caller's own account (§13.6.2).
+- **(b) Inserted account token.** The receiver is configured with an `account_token_position`, and `sub` equals the arrival subject with the token at that position removed. Behind such an export a caller may sign either the local name it publishes to or the token-bearing subject its import names; both verify, by (b) and (a).
+- **(c) Renamed by the receiver's own import.** For a subject the signer also publishes for its own account (§13.6.2), where the receiver's account imported it under a different name. The receiver rebuilds, from the arrival subject and its own import, the one subject the message carried in the signer's account, and `sub` MUST equal it. This is an equality with a subject the receiver computes, never a match on a shape. Trailing tokens do not identify a subject: a rule on the tail alone would accept a signature the same agent made over another subject of the same shape — for a heartbeat on `agents.hb.{agent}.{owner}.{name}`, one over `agents.prompt.{agent}.{owner}.{name}`.
+
+Whenever an `account_token_position` is configured, the token at that position of the arrival subject MUST equal the header's `account`, in every form. A position beyond the arrival subject's token count fails the check. The inserted token is a server stamp only on an endpoint no user of the receiver's own account can publish to; on an open endpoint a same-account user can publish the full subject, and a matching `account`, themselves.
+
+#### 13.7.2 What the signature proves about `account`
+
+The seed for `user` proves `user`. The same seed signs `account`, so `account` is the seed holder's word, bound to the signature: a relay cannot alter it; the sender could lie. `$SYS.REQ.USER.INFO` does not help the receiver: it describes the receiver's own connection, never the sender of a received message.
+
+**The verified identity is `user`.** The protocol grants nothing on `account`. A user NKEY is a random ed25519 public key, so `user` alone makes the agent ID unique; `account` adds tenancy context and display value, never uniqueness. A forged `account` therefore gains nothing by itself: nothing in the protocol grants on it, and whoever does grant on it has verified it elsewhere.
+
+A receiver that needs `account` verified uses a source outside the header: a server stamp where the deployment produces one — the token an `account_token_position` export inserts, or `Nats-Request-Info` — on an endpoint the deployment has closed to publishers in the receiver's own account, so that every request crossed an import; or a lookup in a registry it trusts. Such attestation is a deployment matter, outside the trust classes of §13.1.
+
+#### 13.7.3 Acceptance
+
+Whether a receiver accepts a verified sender is authorization, which the protocol leaves with the deployment (§10.1). This chapter defines how to verify a key, not which to accept. A receiver that refuses a verified sender answers `403`; one that refuses a claimed or absent sender answers `401`.
+
+### 13.8 Stored messages
+
+The header is not limited to live requests. JetStream stores client-set headers verbatim, so a signed `Agent-Sender` on a message published into a stream survives storage, replay, and redelivery. A consumer verifies it from the stored subject, payload, and header, later and offline: per-record, verifiable authorship. The server-injected `Nats-Request-Info` does not reach a stream; the signed header is the only authorship a stream consumer can verify.
+
+Verification of a stored message differs from §13.7 in two ways:
+
+- **Authorship only.** The consumer verifies the signature and `sub`, and skips the `ts` window and the nonce set: redelivery and replay show the same record again by design. A valid signature proves who signed the content. It does not prove that the record is unique, or that the signer published it into this stream: anyone with publish permission on the stream subject can store a copy, and the copy verifies. Consumers deduplicate on `(user, nonce)`. Publishers SHOULD set `Nats-Msg-Id` to the nonce, so the stream's own duplicate window helps. The stream sequence proves storage order, nothing more.
+- **The stored subject is the arrival subject.** §13.7.1 applies with the stored subject, under the same configuration as live verification. A stream fed through an import renamed by the caller's account stores the exporter's subject, which the caller signed. A stream behind an export that inserts the account token stores the token-bearing subject, and the consumer removes the token by position. A stream `subject_transform`, or a mirror that transforms subjects, breaks the link: a stream whose records carry `Agent-Sender` MUST NOT transform subjects on the way in.
+
+### 13.9 Declaring the requirement
+
+An agent that implements this chapter MUST declare what its `prompt` endpoint requires of the sender, in that endpoint's metadata (§2.1), next to `max_payload` and `attachments_ok`:
+
+```json
+{
+  "max_payload": "1MB",
+  "attachments_ok": true,
+  "min_sender_trust": "signed"
+}
+```
+
+| Value    | The endpoint serves a request when                                                               |
+|----------|--------------------------------------------------------------------------------------------------|
+| `any`    | Always. The default, and what an endpoint without the field implies.                            |
+| `signed` | The request is verified (§13.7). The receiver may still refuse the sender (`403`).              |
+
+An endpoint that declares `signed` rejects a request that is not verified with `401`.
+
+Callers read the requirement from `$SRV.INFO.agents` before sending, so an unsigned request fails predictably. A caller that reads an unknown value MUST treat it as `signed`, the strictest level it can satisfy on its own. There is no wire value for acceptance: the only thing a caller can act on is whether to sign.
+
+The `status` endpoint (§8.7) declares nothing and is always answerable: a liveness probe MUST NOT depend on the prober's credentials. The caller still attaches `Agent-Sender` to a `status` request, and the receiver classifies it (§13.7) so the agent knows who probed it. A receiver MUST NOT reject a `status` request on identity grounds: a failing classification is logged and the reply is sent anyway.
+
+### 13.10 Registration
+
+An agent that implements this chapter adds its agent ID to the service metadata (§3.2), next to `agent`, `owner`, and `protocol_version`:
+
+```json
+{
+  "user_nkey": "U…",
+  "account": "A…",
+  "id_sig": "<base64url>"
+}
+```
+
+| Field       | Type   | Description                                                                 |
+|-------------|--------|-----------------------------------------------------------------------------|
+| `user_nkey` | string | The agent's user public NKEY.                                               |
+| `account`   | string | The agent's account (§13.3).                                                |
+| `id_sig`    | string | Signature over the identity fields (below), base64url without padding.      |
+
+They are the pair the agent writes into every `Agent-Sender` header it sends.
+
+Service metadata is self-declared. Without a signature any instance could register a foreign NKEY, capture reverse lookups for it, and misdirect callers to its own prompt subject. `id_sig` makes the claim verifiable. It is an ed25519 signature by the agent's user seed over:
+
+```
+AGENT-ID-V1\n{user_nkey}\n{account}\n{agent}\n{owner}\n{prompt_subject}\n
+```
+
+As with `Agent-Sender`, the input is never sent. A verifier rebuilds it from the `user_nkey`, `account`, `agent`, and `owner` metadata values and the `subject` of the instance's `prompt` endpoint, all read from the same `$SRV.INFO` record, and verifies `id_sig` against `user_nkey`. `prompt_subject` is the advertised subject, not one derived from the instance name: the agent chooses its subject (§2), and the subject is what a reverse lookup returns.
+
+A valid `id_sig` proves the registrant holds the seed for `user_nkey` and vouches for that prompt subject. Metadata without `id_sig`, or with a failing one, is a claim.
+
+**Reverse lookup.** A receiver maps a verified sender back to a protocol address by indexing `$SRV.INFO.agents` records by `(account, user_nkey)` and keeping only instances whose `id_sig` verifies. No verified instance means the sender is not a reachable agent: a human, a plain service, or an agent that is offline. Both proofs chain to the same seed, so they cannot disagree. Discovery is account-local (§4): the lookup sees only agents whose `$SRV` subjects the receiver's account can reach. Implementations SHOULD cache the index for a short time rather than enumerate per message. The lookup identifies; it never authorizes.
+
+**What publication gives others.** Only public halves are published. A reader of `$SRV.INFO` can verify the agent's signatures, which is the point. They can claim the pair in an unsigned `Agent-Sender`, which lands in the claimed class. They can republish the agent's `id_sig`, which verifies only over the agent's own fields and prompt subject, and so re-announces the agent's registration and nothing else. Producing a `sig` or an `id_sig` that verifies, or connecting as the agent, needs the seed. A captured signed header is bound to its subject, payload, timestamp, and nonce.
+
+### 13.11 Signed heartbeat
+
+An agent that implements this chapter and holds its seed MUST attach `Agent-Sender` to every heartbeat it publishes (§8):
+
+- `sub`: the heartbeat subject as published.
+- `ts`: the heartbeat's own `ts` field (§8.3).
+- `nonce`: fresh for every heartbeat.
+- `sig`: over the heartbeat payload bytes as published, by the seed that signs `id_sig`.
+
+Without a seed it publishes heartbeats without the header, as in 0.3. The payload does not change, so a subscriber that does not implement this chapter is unaffected. A signed heartbeat makes an agent's liveness attributable on its own, including to a subscriber in another account.
+
+A subscriber that verifies heartbeats applies §13.7 to each. Where its own account imported the heartbeat subject under another name, `sub` is acceptable by §13.7.1 (c). There is no reply to carry an error: a heartbeat that fails verification is discarded, never downgraded to a claim.
+
+An agent MUST NOT sign a reply. A `status` reply (§8.7) carries a heartbeat-shaped payload, but it arrives on the requester's inbox, where no signed subject could verify.
+
+### 13.12 Security considerations
+
+- **Trusted server.** The NATS connect handshake signs a server-chosen nonce with the same seed that signs `Agent-Sender`. A server the client should not trust — a hostile one, or a man in the middle on a connection without TLS — can present an `AGENT-SENDER-V1` input of its choice as that nonce and obtain a signature valid for the replay window against any agent. No implementation can prevent this; it is the precondition every NATS credential already has. Identity is meaningful only over TLS to a server whose certificate the client verifies.
+- **Responder identity.** This chapter authenticates the caller to the receiver, not the responder to the caller. Any connection in the receiver's account with the right permissions can join the `agents` queue group on a prompt subject and answer in the agent's place; `id_sig` proves who registered, not who answered a given request. Account isolation and subject permissions remain the defense.
+- **Confidentiality.** Identity only. Payload confidentiality stays with TLS and account isolation.
+- **Display (informative).** Whatever shows an identity to a human should show its trust class, `verified` or `claimed`, next to it, so that a claim never reads as proof.
+
+### 13.13 Relation to 0.3
+
+Identity is additive:
+
+- A caller with identity sending to an agent without it: the agent ignores the unknown header and serves the request.
+- A caller without identity sending to an agent with it: the `prompt` endpoint declares `any` by default and serves the request with an absent sender. Only an endpoint that declares `signed` excludes callers without identity, and it says so in `$SRV.INFO`.
+- The new metadata fields are additional metadata, which §3.2 already permits and requires relays to preserve.
+- No subject, envelope, chunk, or heartbeat payload changes. §9.2 gains no codes.
+
+The extension carries its own versions — `v` in the header, and the tags `AGENT-SENDER-V1` and `AGENT-ID-V1` — so it is versioned independently of the protocol. `protocol_version` stays `"0.3"`. Support is detectable without a version number: an agent implements this chapter if and only if its `prompt` endpoint metadata carries `min_sender_trust`; a caller implements it if and only if it sends `Agent-Sender`.
 
 ---
 
@@ -859,6 +1239,59 @@ Returned by `$SRV.INFO.agents` (one response per instance):
   ]
 }
 ```
+
+### B.13 Signed request (§13)
+
+Known-answer vector `operator-account-signed` from the SDKs' shared fixtures, [`test-fixtures/identity/sender-vectors.json`](https://github.com/synadia-ai/synadia-agents/blob/main/test-fixtures/identity/sender-vectors.json). The seed is a throwaway test key, published so the signature can be reproduced. Never use it anywhere else.
+
+Inputs:
+
+```
+seed      SUAEJ6GDK6FSSB54LD45Q7W25AW7NUT7MVLBABIR5MIPFUTBW7ZNPK2KYE   (test only)
+account   AABYLMBR6Q2CDXTLGRQCFA2GP76BGCDF7NZF2OVHH4RQ7L3Y3TZWJDRL
+user      UCDUW5V44EBDBIK2FL4CTNDBQFNGBEZVJHSZGQVKRHASN4AV4IWPB5NT
+subject   agents.prompt.demo-agent.alice.example
+payload   {"prompt":"hello"}                                           (18 bytes)
+ts        2026-08-28T12:00:00Z
+nonce     nonce-operator-account-signed
+```
+
+Agent ID (§13.3, 113 characters):
+
+```
+AABYLMBR6Q2CDXTLGRQCFA2GP76BGCDF7NZF2OVHH4RQ7L3Y3TZWJDRL.UCDUW5V44EBDBIK2FL4CTNDBQFNGBEZVJHSZGQVKRHASN4AV4IWPB5NT
+```
+
+Signed input (§13.6.1): seven lines, each ending in one LF. The last line is the SHA-256 of the 18 payload bytes. Never sent.
+
+```
+AGENT-SENDER-V1
+AABYLMBR6Q2CDXTLGRQCFA2GP76BGCDF7NZF2OVHH4RQ7L3Y3TZWJDRL
+UCDUW5V44EBDBIK2FL4CTNDBQFNGBEZVJHSZGQVKRHASN4AV4IWPB5NT
+agents.prompt.demo-agent.alice.example
+2026-08-28T12:00:00Z
+nonce-operator-account-signed
+8a44725210b9dcd4fefd9f0eca07b70ae45e69274a3105fb25eb426a2cf8bbf4
+```
+
+`sig` — ed25519 over the signed input, base64url without padding (64 bytes, 86 characters):
+
+```
+EPGc0tNF0ZQeBqXUduwUp3zdi33k1AKIXOX-PUPSeY9QtS4V3d2EZLq-fHuPuYkw6Cc3HdVn_jVI58Y_3YBZBw
+```
+
+Published to `agents.prompt.demo-agent.alice.example` — header block, then payload. Header lines end in CRLF.
+
+```
+NATS/1.0
+Agent-Sender: {"v":1,"account":"AABYLMBR6Q2CDXTLGRQCFA2GP76BGCDF7NZF2OVHH4RQ7L3Y3TZWJDRL","user":"UCDUW5V44EBDBIK2FL4CTNDBQFNGBEZVJHSZGQVKRHASN4AV4IWPB5NT","name":"claude-code","sub":"agents.prompt.demo-agent.alice.example","ts":"2026-08-28T12:00:00Z","nonce":"nonce-operator-account-signed","sig":"EPGc0tNF0ZQeBqXUduwUp3zdi33k1AKIXOX-PUPSeY9QtS4V3d2EZLq-fHuPuYkw6Cc3HdVn_jVI58Y_3YBZBw"}
+
+{"prompt":"hello"}
+```
+
+The header value is 373 bytes; the header block (`NATS/1.0␍␊Agent-Sender: …␍␊␍␊`) is 401 bytes, which count toward `max_payload` together with the 18 payload bytes (§13.5.1). `name` is outside the signature.
+
+At the receiver the arrival subject equals `sub` (§13.7.1 (a)). The receiver rebuilds the seven lines from the header fields and the SHA-256 of the received payload, and verifies `sig` against `user`.
 
 ---
 

@@ -7,7 +7,9 @@ identifying, discovering, and communicating with AI agents.
 
 - [Core protocol](core-protocol.md) — subject hierarchy, service
   registration, request/response shape, streaming, mid-stream queries,
-  heartbeat, errors, and versioning.
+  heartbeat, errors, and versioning; plus the optional
+  [sender-identity extension](core-protocol.md#13-sender-identity-optional-extension)
+  (§13).
 
 ## Implementations
 
