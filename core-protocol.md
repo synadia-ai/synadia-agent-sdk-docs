@@ -911,7 +911,7 @@ Signing needs no knowledge of how the receiver is deployed — same account, cro
 Two cases need nothing from the signer beyond signing what it publishes:
 
 - **An export that inserts the caller's account** (`account_token_position`). The server inserts the caller's account at that position on the way in; the receiver removes it before comparing (§13.7.1 (b)). A `to` that merely drops that token is not a rename in the sense above.
-- **A subject the signer also publishes for its own account.** When a subject has consumers in the signer's own account and another account imports it under a different name, the signer cannot sign the importer's name without failing every verifier at home. The heartbeat (§13.11) is the case. The receiver accepts it by §13.7.1 (c).
+- **A subject the signer also publishes for its own account.** When a subject has consumers in the signer's own account, and an import renamed it on the way to the receiver, the subject the receiver sees differs from the subject the signer published in its own account. The signer cannot sign the name the receiver sees without failing every verifier at home, so it signs what it publishes. This takes precedence over the renamed-import rule above. The heartbeat (§13.11) is the case. The receiver accepts it by §13.7.1 (c).
 
 ### 13.7 Verification (receiver side)
 
@@ -943,7 +943,7 @@ The nonce set lives in the receiving instance. Instances of one logical agent be
 
 - **(a) Equal.** `sub` equals the arrival subject. This covers the direct case and the import renamed by the caller's own account (§13.6.2).
 - **(b) Inserted account token.** The receiver is configured with an `account_token_position`, and `sub` equals the arrival subject with the token at that position removed. Behind such an export a caller may sign either the local name it publishes to or the token-bearing subject its import names; both verify, by (b) and (a).
-- **(c) Renamed by the receiver's own import.** For a subject the signer also publishes for its own account (§13.6.2), where the receiver's account imported it under a different name. The receiver rebuilds, from the arrival subject and its own import, the one subject the message carried in the signer's account, and `sub` MUST equal it. This is an equality with a subject the receiver computes, never a match on a shape. Trailing tokens do not identify a subject: a rule on the tail alone would accept a signature the same agent made over another subject of the same shape — for a heartbeat on `agents.hb.{agent}.{owner}.{name}`, one over `agents.prompt.{agent}.{owner}.{name}`.
+- **(c) Renamed by an import.** For a subject the signer also publishes for its own account (§13.6.2). The subject the receiver sees differs from the subject the signer published in its own account, because an import renamed it. The receiver rebuilds that subject from the arrival subject and the mapping it knows, and `sub` MUST equal it. This is an equality with a subject the receiver computes, never a match on a shape. Trailing tokens do not identify a subject: a rule on the tail alone would accept a signature the same agent made over another subject of the same shape — for a heartbeat on `agents.hb.{agent}.{owner}.{name}`, one over `agents.prompt.{agent}.{owner}.{name}`.
 
 Whenever an `account_token_position` is configured, the token at that position of the arrival subject MUST equal the header's `account`, in every form. A position beyond the arrival subject's token count fails the check. The inserted token is a server stamp only on an endpoint no user of the receiver's own account can publish to; on an open endpoint a same-account user can publish the full subject, and a matching `account`, themselves.
 
@@ -1036,7 +1036,7 @@ An agent that implements this chapter and holds its seed MUST attach `Agent-Send
 
 Without a seed it publishes heartbeats without the header, as in 0.3. The payload does not change, so a subscriber that does not implement this chapter is unaffected. A signed heartbeat makes an agent's liveness attributable on its own, including to a subscriber in another account.
 
-A subscriber that verifies heartbeats applies §13.7 to each. Where its own account imported the heartbeat subject under another name, `sub` is acceptable by §13.7.1 (c). There is no reply to carry an error: a heartbeat that fails verification is discarded, never downgraded to a claim.
+A subscriber that verifies heartbeats applies §13.7 to each. Where the subject it sees differs from the heartbeat subject the agent published in its own account, because an import renamed it, `sub` is acceptable by §13.7.1 (c). There is no reply to carry an error: a heartbeat that fails verification is discarded, never downgraded to a claim.
 
 An agent MUST NOT sign a reply. A `status` reply (§8.7) carries a heartbeat-shaped payload, but it arrives on the requester's inbox, where no signed subject could verify.
 
