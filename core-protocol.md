@@ -490,7 +490,14 @@ Agents SHOULD begin publishing heartbeats only after service registration is com
   "session": "synadia-com-2",
   "instance_id": "VMKS6MHK71PCPWGY38A7N5",
   "ts": "2026-04-21T14:23:01Z",
-  "interval_s": 30
+  "interval_s": 30,
+  "protocol_version": "0.3",
+  "endpoints": {
+    "prompt": {
+      "subject": "agents.prompt.claude-code.aconnolly.synadia-com-2",
+      "metadata": { "max_payload": "1MB", "attachments_ok": "true", "min_sender_trust": "signed" }
+    }
+  }
 }
 ```
 
@@ -502,8 +509,12 @@ Agents SHOULD begin publishing heartbeats only after service registration is com
 | `instance_id` | string | Yes                | The micro service framework's per-instance identifier. Matches the service `id`.                                       |
 | `ts`          | string | Yes                | UTC ISO 8601 timestamp of publication.                                                                                 |
 | `interval_s`  | number | Yes                | This instance's cadence in seconds. > 0; recommended ≥ 1.                                                              |
+| `protocol_version` | string | No            | Matches `metadata.protocol_version` (§3.2).                                                                            |
+| `endpoints`   | object | No                 | Declared endpoints by name. An agent that declares any SHOULD declare `prompt`: its registered `subject` and its endpoint `metadata` (§2.1), copied verbatim from the registration. |
 
 The instance name is not duplicated into the payload — receivers extract it from the 5th token of the heartbeat's subject.
+
+`protocol_version` and `endpoints` let a listener on the heartbeat know where and how to prompt an instance without discovery: the `prompt` subject it serves on, and the capability metadata a caller enforces before sending (§5.4), `min_sender_trust` included (§13.9). They are declarations, not a replacement for §3: registration stays the authoritative source, and a caller that prompts SHOULD still prefer the discovery record when both are at hand. A signed heartbeat (§13) covers them with its payload hash. A receiver that finds either field malformed ignores that field and keeps the heartbeat.
 
 Callers MUST tolerate additional unknown fields.
 
@@ -537,7 +548,7 @@ In addition to the periodic pub/sub heartbeat (§8.1–§8.3), every agent MUST 
 | Request body     | Reserved. Agents MUST currently ignore the request body. Future revisions MAY define a request schema. |
 | Reply body       | A §8.3 heartbeat-shaped JSON payload, freshly built per request.         |
 
-The reply payload uses **exactly the §8.3 schema** — same `agent`, `owner`, optional `session`, `instance_id`, `ts`, `interval_s` fields. Receivers MAY treat a status reply as if it were a just-arrived heartbeat: feed it into the same liveness tracker, key on `instance_id`, etc.
+The reply payload uses **exactly the §8.3 schema** — same `agent`, `owner`, optional `session`, `instance_id`, `ts`, `interval_s` fields, and the optional `protocol_version` and `endpoints` declarations. Receivers MAY treat a status reply as if it were a just-arrived heartbeat: feed it into the same liveness tracker, key on `instance_id`, etc.
 
 Two motivating use cases:
 
