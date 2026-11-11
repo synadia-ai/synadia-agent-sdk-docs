@@ -219,7 +219,7 @@ Callers with a known `instance_id`:
 nats req '$SRV.INFO.agents.VMKS6MHK71PCPWGY38A7N5' '' --timeout=2s
 ```
 
-Callers with a known identity tuple but no `instance_id` run general discovery and filter client-side on `metadata.agent`, `metadata.owner`, and the 4th token of the endpoint subject.
+Callers with a known identity tuple but no `instance_id` run general discovery and filter client-side on `metadata.agent`, `metadata.owner`, and the 3rd, 4th, and 5th tokens of the endpoint subject (agent, owner, and instance name).
 
 ### 4.3 Using a discovery record
 
@@ -227,7 +227,7 @@ From a service info record, a caller:
 
 1. Reads `metadata.agent`, `metadata.owner`, optional `metadata.session`, and `metadata.protocol_version`.
 2. Locates the `prompt` endpoint by `name == "prompt"` and reads its `subject` and its metadata (`max_payload`, `attachments_ok`).
-3. Derives the instance name from the 4th token of the endpoint's `subject` when the subject follows the default pattern (§2); otherwise the instance name is taken from the agent's `metadata.session` or is opaque to the caller.
+3. Derives the instance name from the 5th token of the endpoint's `subject` when the subject follows the default pattern (§2); otherwise the instance name is taken from the agent's `metadata.session` or is opaque to the caller.
 4. Enforces §5.4 validation using the endpoint metadata.
 5. Publishes requests to the endpoint's `subject` verbatim - no construction.
 
