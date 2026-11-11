@@ -300,7 +300,7 @@ A future revision will define the `attachments` endpoint at `agents.attachments.
 - Uploaded files are staged in a temp directory accessible to the agent and injected by reference into the next `prompt` request's context.
 - Likely backed by JetStream Object Store.
 
-Precise wire format, chunking, lifetime, and reference-handoff semantics are deferred. v0.1 implementations SHOULD structure attachment handling so that adding the `attachments`-endpoint code path is additive, not a rewrite.
+Precise wire format, chunking, lifetime, and reference-handoff semantics are deferred. Implementations of this version SHOULD structure attachment handling so that adding the `attachments`-endpoint code path is additive, not a rewrite.
 
 ### 5.6 Unknown fields
 
@@ -335,7 +335,7 @@ Every non-terminating chunk is a typed JSON object:
 
 | Field  | Type          | Required | Description                                                                           |
 |--------|---------------|----------|---------------------------------------------------------------------------------------|
-| `type` | string        | Yes      | Chunk discriminator. v0.1 defines `response`, `status`, `query` (§6.3–6.4, §7).       |
+| `type` | string        | Yes      | Chunk discriminator. This version defines `response`, `status`, `query` (§6.3–6.4, §7).       |
 | `data` | string/object | Yes      | Chunk payload. Shape is determined by `type`.                                         |
 
 Plain-text shorthand is **not** accepted on the response side: every non-terminating chunk MUST be a JSON object with a `type` discriminator.
@@ -371,7 +371,7 @@ Lifecycle signal emitted during long-running work. `data` is a string status tok
 { "type": "status", "data": "ack" }
 ```
 
-v0.1 defines one status value:
+This version defines one status value:
 
 | Value | Meaning                                                                                                              |
 |-------|----------------------------------------------------------------------------------------------------------------------|
@@ -406,7 +406,7 @@ Forward-compat rules for callers:
 - MUST silently ignore chunks whose `type` is unrecognized.
 - MUST tolerate unknown fields in `data` objects and preserve them when relaying.
 
-Agents that require at-least-once delivery SHOULD wait for a future JetStream-backed pattern. v0.1 operates on core NATS only.
+Agents that require at-least-once delivery SHOULD wait for a future JetStream-backed pattern. This version operates on core NATS only.
 
 ### 6.7 Cancellation
 
