@@ -88,7 +88,7 @@ The `prompt` endpoint's registration (§3) MUST declare endpoint metadata:
 
 | Key              | Type    | Required | Description                                                                                                                                                                        |
 |------------------|---------|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `max_payload`    | string  | Yes      | Maximum single-message request payload size. Format is a positive integer followed by `B`, `KB`, `MB`, or `GB` (e.g. `512KB`, `1MB`, `4MB`). Callers MUST enforce locally (§5.4).  |
+| `max_payload`    | string  | Yes      | Maximum single-message request payload size. Format is a positive integer followed by `B`, `KB`, `MB`, or `GB` (e.g. `512KB`, `1MB`, `4MB`); units are binary (`KB` = 1024 bytes, `MB` = 1024 KB, `GB` = 1024 MB). Callers MUST enforce locally (§5.4).  |
 | `attachments_ok` | boolean | Yes      | Whether the endpoint accepts JSON envelopes containing an `attachments` array. If `false`, callers MUST NOT send attachments; plain text and JSON-without-attachments remain valid. |
 
 ### 2.2 Naming rules
@@ -288,7 +288,7 @@ A zero-byte request payload is invalid and MUST be rejected with status `400`.
 Before publishing, the caller MUST enforce the `prompt` endpoint's capability metadata (§2.1):
 
 - If any attachment is present and `attachments_ok` is `false`, the caller MUST fail locally without publishing.
-- The caller MUST compute the final encoded payload byte size and fail locally if it exceeds `max_payload`.
+- The caller MUST compute the final encoded payload byte size, plus the bytes of any headers it sends (§13.5.1), and fail locally if the total exceeds `max_payload`.
 
 These local checks spare a round trip and agent-side resources. Agents MAY additionally enforce server-side and respond with `400`.
 
