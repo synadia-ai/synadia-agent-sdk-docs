@@ -95,7 +95,7 @@ The `prompt` endpoint's registration (§3) MUST declare endpoint metadata:
 
 Subject tokens MUST conform to NATS subject naming rules (https://docs.nats.io/nats-concepts/subjects#characters-allowed-and-recommended-for-subject-names).
 
-- Tokens MUST NOT begin with `$`.
+- Tokens MUST NOT begin with `$`, except `$G` as the account token of an agent ID on a server with no accounts (§13.3.1).
 - Tokens SHOULD use only `a`–`z`, `0`–`9`, `-`, `_`.
 - Each token SHOULD be 1–63 characters; fully qualified subjects SHOULD stay under 256 characters.
 
@@ -807,7 +807,7 @@ $G.UAWW24XPLGOX3R3JF4OZEZZ6RUXMB55DSWJCEFFSUDFBCKJD4MSCMQYI                     
 
 The form is two subject tokens, each within the 63-character limit of §2.2. It drops into a subject unchanged and comes back out as that subject's last two tokens. With `svc` standing for any prefix a deployment owns, `svc.{account}.>` matches every agent of one account and `svc.*.{user}` matches one user in any account. The protocol itself defines no subject that carries an agent ID; its subjects stay as §2 defines them.
 
-NKEY tokens are an exception to the lower-case recommendation of §2.2: they are upper case as issued. `$G` is a legal NATS token, not a §2.2-conformant one, and appears only on a server with no accounts.
+NKEY tokens are an exception to the lower-case recommendation of §2.2: they are upper case as issued. `$G` is a legal NATS token and a stated exception to the `$` rule of §2.2; it appears only on a server with no accounts.
 
 A KV key allows `[-/_=.a-zA-Z0-9]` and uses `.` as its separator, so the NKEY form and the name form are valid KV key names unchanged. `$G` is not.
 
