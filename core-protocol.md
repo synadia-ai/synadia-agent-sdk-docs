@@ -683,7 +683,7 @@ Optional: an **agent that implements §13** (sender identity) additionally:
 
 - Declares `min_sender_trust` (`any` or `signed`) in the `prompt` endpoint metadata; declares nothing on `status` (§13.9).
 - Adds `user_nkey`, `account`, and `id_sig` to the service metadata (§13.10).
-- Classifies every `prompt` and `status` request as verified, claimed, or absent before the application sees it. Rejects a malformed `Agent-Sender` with `400` and a failing signature with `401`, whatever `min_sender_trust` says (§13.7).
+- Classifies every `prompt` and `status` request as verified, claimed, or absent before the application sees it. Rejects a `prompt` request with a malformed `Agent-Sender` with `400` and a failing signature with `401`, whatever `min_sender_trust` says (§13.7); a `status` request is classified and answered either way (§13.9).
 - Accepts `sub` only in the forms of §13.7.1; enforces the replay window and a nonce set.
 - On a `signed` endpoint, rejects a request that is not verified with `401`. Answers `403` when it refuses a verified sender. Never rejects a `status` request on identity grounds (§13.9).
 - Grants nothing on a claimed identity, or on `account` alone (§13.1, §13.7.2).
@@ -935,7 +935,7 @@ A receiver that implements this chapter classifies each request before the appli
    - `ts` lies within the replay window (default: 30 s skew).
    - `nonce` has not been seen for this `user` within the window. The nonce set is keyed by `(user, nonce)`.
 
-   If all pass, the request is **verified**: the sender holds the seed for `user`, and `(account, user)` is the pair it signed. If any fails, reject with `401`. A failing signature is evidence of tampering or replay, never a weaker claim; it is rejected whatever the endpoint's `min_sender_trust`. An implementation MAY run the cheap checks before the signature; the outcome is the same.
+   If all pass, the request is **verified**: the sender holds the seed for `user`, and `(account, user)` is the pair it signed. If any fails, reject a `prompt` request with `401`; a `status` request is not rejected (§13.9). A failing signature is evidence of tampering or replay, never a weaker claim; it is rejected whatever the endpoint's `min_sender_trust`. An implementation MAY run the cheap checks before the signature; the outcome is the same.
 4. A well-formed header without `sig`: **claimed**.
 
 Rejections follow §9: an error-headered message, then the terminator.
