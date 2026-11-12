@@ -82,14 +82,16 @@ The `prompt` endpoint's registration (§3) MUST declare endpoint metadata:
 ```json
 {
   "max_payload": "1MB",
-  "attachments_ok": true
+  "attachments_ok": "true"
 }
 ```
 
 | Key              | Type    | Required | Description                                                                                                                                                                        |
 |------------------|---------|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `max_payload`    | string  | Yes      | Maximum single-message request payload size. Format is a positive integer followed by `B`, `KB`, `MB`, or `GB` (e.g. `512KB`, `1MB`, `4MB`). Callers MUST enforce locally (§5.4).  |
-| `attachments_ok` | boolean | Yes      | Whether the endpoint accepts JSON envelopes containing an `attachments` array. If `false`, callers MUST NOT send attachments; plain text and JSON-without-attachments remain valid. |
+| `attachments_ok` | string  | Yes      | `"true"` or `"false"`. Whether the endpoint accepts JSON envelopes containing an `attachments` array. If `false`, callers MUST NOT send attachments; plain text and JSON-without-attachments remain valid. |
+
+Endpoint metadata is a string-to-string map on the wire, so every value in it is a string. `attachments_ok` is written `"true"` or `"false"`, and a caller reads it by comparing against those two strings. In this document, "`attachments_ok` is `false`" means the string `"false"`. The §8.3 heartbeat copies the metadata verbatim, so it carries the same strings.
 
 ### 2.2 Naming rules
 
@@ -986,7 +988,7 @@ An agent that implements this chapter MUST declare what its `prompt` endpoint re
 ```json
 {
   "max_payload": "1MB",
-  "attachments_ok": true,
+  "attachments_ok": "true",
   "min_sender_trust": "signed"
 }
 ```
@@ -1239,7 +1241,7 @@ Returned by `$SRV.INFO.agents` (one response per instance):
       "queue_group": "agents",
       "metadata": {
         "max_payload": "1MB",
-        "attachments_ok": true
+        "attachments_ok": "true"
       }
     },
     {
