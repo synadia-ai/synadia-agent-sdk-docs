@@ -1,8 +1,8 @@
 # Synadia Agent Protocol for NATS
 
-**Version:** 0.3.0
+**Version:** 0.3.1
 **Status:** Draft
-**Date:** 2026-09-21
+**Date:** 2026-11-15
 
 ## 1. Introduction
 
@@ -546,20 +546,41 @@ In addition to the periodic pub/sub heartbeat (§8.1–§8.3), every agent MUST 
 | Default subject  | `agents.status.{agent}.{owner}.{name}`                                   |
 | Queue group      | `"agents"` (same as `prompt`; see §3.3 — load-balances across same-identity instances) |
 | Request body     | Reserved. Agents MUST currently ignore the request body. Future revisions MAY define a request schema. |
-| Reply body       | A §8.3 heartbeat-shaped JSON payload, freshly built per request.         |
+| Reply body       | A §8.3 heartbeat-shaped JSON payload, freshly built per request. It MAY carry further fields, among them the reserved OSC 7501 specified program-status keys (§8.7.2). |
 
-The reply payload uses **exactly the §8.3 schema** — same `agent`, `owner`, optional `session`, `instance_id`, `ts`, `interval_s` fields, and the optional `protocol_version` and `endpoints` declarations. Receivers MAY treat a status reply as if it were a just-arrived heartbeat: feed it into the same liveness tracker, key on `instance_id`, etc.
+The reply payload uses the §8.3 schema — same `agent`, `owner`, optional `session`, `instance_id`, `ts`, `interval_s` fields, and the optional `protocol_version` and `endpoints` declarations. Receivers MAY treat a status reply as if it were a just-arrived heartbeat: feed it into the same liveness tracker, key on `instance_id`, etc.
 
-Two motivating use cases:
+The reply is extensible. An agent MAY add fields beyond those of §8.3, and callers MUST tolerate unknown fields (§8.3). §8.7.2 reserves a set of keys for one such use, program status. The reservation does not limit what else a reply carries, or what the `status` endpoint is used for.
+
+Three motivating use cases:
 
 1. **Bootstrap a tracker without waiting a full heartbeat interval.** A caller that just connected and wants point-in-time liveness for a known instance can `nats req agents.status.{agent}.{owner}.{name} ''` instead of waiting up to `interval_s` for the next pub/sub beat to arrive.
-2. **Future agent-state queries.** Subsequent revisions MAY extend the reply payload with richer agent metadata (cost so far, queue depth, capability hints, ...). Sourcing the reply from the same builder used for periodic heartbeats keeps the two streams in lockstep.
+2. **Mirroring OSC 7501 program-state status.** A caller asks what an agent is doing, through the program-status keys of §8.7.2.
+3. **Other future agent-state queries.** Subsequent revisions MAY extend the reply payload with richer agent metadata (cost so far, queue depth, capability hints, ...). Sourcing the reply from the same builder used for periodic heartbeats keeps the two streams in lockstep.
 
 #### 8.7.1 Implementation notes
 
 - Agents SHOULD source the reply payload from the same builder used to construct periodic heartbeats so the two emit identical values for fields they share.
 - A `respond` failure (broker dropped, request reply already torn down) is best-effort — agents MAY swallow it and continue serving.
 - An exception thrown while constructing the payload MUST be returned as a `Nats-Service-Error-Code: 500` response (see §9), not propagated into the framework's default handling.
+
+#### 8.7.2 Reserved program-status keys
+
+The status reply reserves the keys of OSC 7501, the terminal program-status protocol, [revision 0.4](https://superlogical.com/rex/docs/build/program-status):
+
+`state`, `kind`, `progress`, `app`, `title`, `msg`, `id`
+
+When a status reply carries any of these keys, the key's value and meaning are those that OSC 7501 revision 0.4 defines for it. That includes OSC 7501's rules for values a reader does not recognise. This document does not restate or change them.
+
+An agent that reports program status in a status reply uses these keys. It MUST NOT give any of them another meaning. It MAY carry any subset of them, or none.
+
+The reservation fixes only what these keys mean when they are present. The reply stays open to other fields (§8.7). A caller that does not read program status ignores these keys, like any other unknown field (§8.3).
+
+Example — an instance blocked on a question its user must answer:
+
+```json
+{"agent":"claude-code","owner":"aconnolly","session":"synadia-com-2","instance_id":"VMKS6MHK71PCPWGY38A7N5","ts":"2026-04-28T14:23:01Z","interval_s":30,"state":"blocked","kind":"question"}
+```
 
 ---
 
@@ -654,7 +675,7 @@ The 0.x line is explicitly unstable. MINOR bumps within 0.x MAY break compatibil
 
 | Version | Status     | Notes          |
 |---------|------------|----------------|
-| `0.3`   | Draft      | This document. Verb-first subject hierarchy (§2 — `agents.{verb}.{a}.{o}.{n}`); heartbeat moves to `agents.hb.{a}.{o}.{n}` (§8.1); new `status` request/reply endpoint (§8.7) replies with the §8.3 heartbeat shape. Not wire-compatible with 0.2 — the prompt subject changed. |
+| `0.3`   | Draft      | This document. Verb-first subject hierarchy (§2 — `agents.{verb}.{a}.{o}.{n}`); heartbeat moves to `agents.hb.{a}.{o}.{n}` (§8.1); new `status` request/reply endpoint (§8.7) replies with the §8.3 heartbeat shape. Not wire-compatible with 0.2 — the prompt subject changed. 0.3.1: the status reply is extensible, and it reserves the program-status keys of OSC 7501 (§8.7.2). The change is additive, and `protocol_version` stays `"0.3"` (§11.1). |
 | `0.2`   | Superseded | Subject hierarchy was `agents.{a}.{o}.{n}` (4 tokens, no verb); heartbeat at `agents.{a}.{o}.{n}.heartbeat`; no `status` endpoint. |
 | `0.1`   | Superseded | Earliest draft — service name was `Synadia Agents`, no required queue group on the `prompt` endpoint. Not wire-compatible with 0.2. |
 
@@ -668,6 +689,7 @@ An **agent** is compliant with protocol `0.3` when it:
 - Declares `metadata.agent`, `metadata.owner`, `metadata.protocol_version = "0.3"`; adds `metadata.session` when session-aware.
 - Registers an endpoint named `prompt` with queue group `"agents"` (§3.3) and endpoint metadata `max_payload` and `attachments_ok`. The endpoint's `subject` is agent-chosen; the recommended default (used by channel plugins) is `agents.prompt.{agent}.{owner}.{name}` (§2 verb-first).
 - Registers an endpoint named `status` with queue group `"agents"` (§8.7). Default subject `agents.status.{agent}.{owner}.{name}`. Replies with a §8.3 heartbeat-shaped payload.
+- If it reports program status in a status reply, uses the reserved OSC 7501 keys, with OSC 7501's values and meanings (§8.7.2).
 - On the `prompt` endpoint:
   - Accepts both JSON envelopes and the plain-text shorthand (§5).
   - Rejects malformed envelopes, empty payloads, invalid base64, oversize requests, and attachments-when-`attachments_ok=false` with status `400`.
@@ -1214,6 +1236,12 @@ Reply — same JSON shape as a heartbeat (B.11), freshly built per request:
 
 ```json
 {"agent":"claude-code","owner":"aconnolly","session":"synadia-com-2","instance_id":"VMKS6MHK71PCPWGY38A7N5","ts":"2026-04-28T14:23:01Z","interval_s":30}
+```
+
+Reply from an agent that reports program status (v0.3.1, §8.7.2), while the agent waits for its user to approve an action:
+
+```json
+{"agent":"claude-code","owner":"aconnolly","session":"synadia-com-2","instance_id":"VMKS6MHK71PCPWGY38A7N5","ts":"2026-04-28T14:23:01Z","interval_s":30,"state":"blocked","kind":"permission"}
 ```
 
 ### B.12 Service info response
