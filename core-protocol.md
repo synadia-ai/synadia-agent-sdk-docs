@@ -1,8 +1,8 @@
 # Synadia Agent Protocol for NATS
 
-**Version:** 0.3.0
+**Version:** 0.3.1
 **Status:** Draft
-**Date:** 2026-09-21
+**Date:** 2026-11-16
 
 ## 1. Introduction
 
@@ -31,7 +31,7 @@ Normative keywords - **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, **MAY**
 
 ### 1.2 Version
 
-This specification is version `0.3.0`. Agents declare the protocol version they implement in service metadata (§3.2). Compatibility rules are in §11.
+This specification is version `0.3.1`. Agents declare the protocol version they implement in service metadata (§3.2). Compatibility rules are in §11.
 
 v0.3 introduced two wire-breaking changes vs. v0.2:
 
@@ -516,6 +516,8 @@ The instance name is not duplicated into the payload — receivers extract it fr
 
 `protocol_version` and `endpoints` let a listener on the heartbeat know where and how to prompt an instance without discovery: the `prompt` subject it serves on, and the capability metadata a caller enforces before sending (§5.4), `min_sender_trust` included (§13.9). They are declarations, not a replacement for §3: registration stays the authoritative source, and a caller that prompts SHOULD still prefer the discovery record when both are at hand. A signed heartbeat (§13) covers them with its payload hash. A receiver that finds either field malformed ignores that field and keeps the heartbeat.
 
+An agent MAY add fields of its own to the payload. An added field MUST NOT reuse the name of a field in the table above. This document gives an added field no meaning; its meaning is the agent's. A signed heartbeat (§13.11) covers added fields with its payload hash, like every other field. An agent that adds fields to its heartbeat SHOULD add the same ones to its status reply (§8.7).
+
 Callers MUST tolerate additional unknown fields.
 
 ### 8.4 On-demand reachability
@@ -546,18 +548,18 @@ In addition to the periodic pub/sub heartbeat (§8.1–§8.3), every agent MUST 
 | Default subject  | `agents.status.{agent}.{owner}.{name}`                                   |
 | Queue group      | `"agents"` (same as `prompt`; see §3.3 — load-balances across same-identity instances) |
 | Request body     | Reserved. Agents MUST currently ignore the request body. Future revisions MAY define a request schema. |
-| Reply body       | A §8.3 heartbeat-shaped JSON payload, freshly built per request.         |
+| Reply body       | A §8.3 heartbeat-shaped JSON payload, freshly built per request, with the agent's added fields (§8.3). |
 
-The reply payload uses **exactly the §8.3 schema** — same `agent`, `owner`, optional `session`, `instance_id`, `ts`, `interval_s` fields, and the optional `protocol_version` and `endpoints` declarations. Receivers MAY treat a status reply as if it were a just-arrived heartbeat: feed it into the same liveness tracker, key on `instance_id`, etc.
+The reply payload uses the §8.3 schema — same `agent`, `owner`, optional `session`, `instance_id`, `ts`, `interval_s` fields, the optional `protocol_version` and `endpoints` declarations, and the fields the agent adds to its heartbeat (§8.3). Receivers MAY treat a status reply as if it were a just-arrived heartbeat: feed it into the same liveness tracker, key on `instance_id`, etc.
 
 Two motivating use cases:
 
 1. **Bootstrap a tracker without waiting a full heartbeat interval.** A caller that just connected and wants point-in-time liveness for a known instance can `nats req agents.status.{agent}.{owner}.{name} ''` instead of waiting up to `interval_s` for the next pub/sub beat to arrive.
-2. **Future agent-state queries.** Subsequent revisions MAY extend the reply payload with richer agent metadata (cost so far, queue depth, capability hints, ...). Sourcing the reply from the same builder used for periodic heartbeats keeps the two streams in lockstep.
+2. **Future agent-state queries.** Subsequent revisions MAY extend the reply payload with richer agent metadata (cost so far, queue depth, capability hints, ...). Until then, an agent's added fields (§8.3) carry such metadata. Sourcing the reply from the same builder used for periodic heartbeats keeps the two streams in lockstep.
 
 #### 8.7.1 Implementation notes
 
-- Agents SHOULD source the reply payload from the same builder used to construct periodic heartbeats so the two emit identical values for fields they share.
+- Agents SHOULD source the reply payload from the same builder used to construct periodic heartbeats so the two emit identical values for fields they share, the agent's added fields (§8.3) included.
 - A `respond` failure (broker dropped, request reply already torn down) is best-effort — agents MAY swallow it and continue serving.
 - An exception thrown while constructing the payload MUST be returned as a `Nats-Service-Error-Code: 500` response (see §9), not propagated into the framework's default handling.
 
@@ -654,7 +656,7 @@ The 0.x line is explicitly unstable. MINOR bumps within 0.x MAY break compatibil
 
 | Version | Status     | Notes          |
 |---------|------------|----------------|
-| `0.3`   | Draft      | This document. Verb-first subject hierarchy (§2 — `agents.{verb}.{a}.{o}.{n}`); heartbeat moves to `agents.hb.{a}.{o}.{n}` (§8.1); new `status` request/reply endpoint (§8.7) replies with the §8.3 heartbeat shape. Not wire-compatible with 0.2 — the prompt subject changed. |
+| `0.3`   | Draft      | This document. Verb-first subject hierarchy (§2 — `agents.{verb}.{a}.{o}.{n}`); heartbeat moves to `agents.hb.{a}.{o}.{n}` (§8.1); new `status` request/reply endpoint (§8.7) replies with the §8.3 heartbeat shape. Not wire-compatible with 0.2 — the prompt subject changed. 0.3.1 is additive, and `protocol_version` stays `"0.3"` (§11.1): the heartbeat's optional `protocol_version` and `endpoints` declarations (§8.3), and an agent's own added fields on its heartbeat and status reply (§8.3, §8.7). |
 | `0.2`   | Superseded | Subject hierarchy was `agents.{a}.{o}.{n}` (4 tokens, no verb); heartbeat at `agents.{a}.{o}.{n}.heartbeat`; no `status` endpoint. |
 | `0.1`   | Superseded | Earliest draft — service name was `Synadia Agents`, no required queue group on the `prompt` endpoint. Not wire-compatible with 0.2. |
 
@@ -675,6 +677,7 @@ An **agent** is compliant with protocol `0.3` when it:
   - Emits an `{type:"status",data:"ack"}` chunk as the first message on the reply subject, before any `response`/`query` chunk and before any latency-inducing work (§6.4).
   - Emits response streams per §6: typed `{type, data}` chunks in publication order, terminated by a zero-byte headerless message. Errors precede the terminator with error headers.
 - Publishes heartbeats on `agents.hb.{agent}.{owner}.{name}` at its configured cadence with all §8.3 fields.
+- If it adds fields of its own to its heartbeat or status reply: reuses no §8.3 field name (§8.3).
 - Responds to `$SRV.PING.agents` and `$SRV.INFO.agents` via the micro service framework.
 - If it issues mid-stream queries: conforms to §7.
 - Uses `respondError` per §9 for errors; `Nats-Service-Error-Code` is set from the §9.2 taxonomy.
@@ -700,6 +703,7 @@ A **caller** is compliant when it:
 - Inspects NATS headers (`Nats-Service-Error-Code`) on every received message before interpreting the body.
 - Treats a zero-byte body with no NATS headers as stream termination (§6.5).
 - Silently ignores unknown chunk types, unknown endpoint names, and unknown metadata keys.
+- Tolerates unknown fields in heartbeat and status payloads (§8.3).
 - Preserves unknown metadata fields when relaying.
 - Tracks liveness per `instance_id` (§8.1).
 
